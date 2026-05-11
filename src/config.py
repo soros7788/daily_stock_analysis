@@ -25,6 +25,12 @@ from src.report_language import (
     normalize_report_language,
 )
 from src.notification_routing import parse_notification_route_channels
+from src.notification_noise import (
+    NOTIFICATION_SEVERITIES,
+    is_supported_notification_severity,
+    parse_notification_quiet_hours,
+    validate_notification_timezone,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -752,6 +758,14 @@ class Config:
     notification_report_channels: List[str] = field(default_factory=list)
     notification_alert_channels: List[str] = field(default_factory=list)
     notification_system_error_channels: List[str] = field(default_factory=list)
+
+    # 通知降噪机制（Issue #1200 P4）：默认全部关闭，仅对静态通知渠道生效
+    notification_dedup_ttl_seconds: int = 0
+    notification_cooldown_seconds: int = 0
+    notification_quiet_hours: str = ""
+    notification_timezone: str = ""
+    notification_min_severity: str = ""
+    notification_daily_digest_enabled: bool = False
 
     # 单股推送模式：每分析完一只股票立即推送，而不是汇总后推送
     single_stock_notify: bool = False
@@ -1483,6 +1497,25 @@ class Config:
             ),
             notification_system_error_channels=parse_notification_route_channels(
                 os.getenv('NOTIFICATION_SYSTEM_ERROR_CHANNELS')
+            ),
+            notification_dedup_ttl_seconds=parse_env_int(
+                os.getenv('NOTIFICATION_DEDUP_TTL_SECONDS'),
+                0,
+                field_name='NOTIFICATION_DEDUP_TTL_SECONDS',
+                minimum=0,
+            ),
+            notification_cooldown_seconds=parse_env_int(
+                os.getenv('NOTIFICATION_COOLDOWN_SECONDS'),
+                0,
+                field_name='NOTIFICATION_COOLDOWN_SECONDS',
+                minimum=0,
+            ),
+            notification_quiet_hours=(os.getenv('NOTIFICATION_QUIET_HOURS') or '').strip(),
+            notification_timezone=(os.getenv('NOTIFICATION_TIMEZONE') or '').strip(),
+            notification_min_severity=(os.getenv('NOTIFICATION_MIN_SEVERITY') or '').strip().lower(),
+            notification_daily_digest_enabled=parse_env_bool(
+                os.getenv('NOTIFICATION_DAILY_DIGEST_ENABLED'),
+                default=False,
             ),
             single_stock_notify=os.getenv('SINGLE_STOCK_NOTIFY', 'false').lower() == 'true',
             report_type=cls._parse_report_type(os.getenv('REPORT_TYPE', 'simple')),
@@ -2444,6 +2477,46 @@ class Config:
                 severity="warning",
                 message="未配置通知渠道，将不发送推送通知",
                 field="WECHAT_WEBHOOK_URL",
+            ))
+
+        if self.notification_quiet_hours:
+            try:
+                parse_notification_quiet_hours(self.notification_quiet_hours)
+            except ValueError as exc:
+                issues.append(ConfigIssue(
+                    severity="error",
+                    message=f"通知静默时段配置无效：{exc}",
+                    field="NOTIFICATION_QUIET_HOURS",
+                ))
+
+        if self.notification_timezone:
+            try:
+                validate_notification_timezone(self.notification_timezone)
+            except ValueError as exc:
+                issues.append(ConfigIssue(
+                    severity="error",
+                    message=f"通知时区配置无效：{exc}",
+                    field="NOTIFICATION_TIMEZONE",
+                ))
+
+        if self.notification_min_severity and not is_supported_notification_severity(self.notification_min_severity):
+            issues.append(ConfigIssue(
+                severity="error",
+                message=(
+                    "通知最低级别配置无效，允许值："
+                    f"{', '.join(NOTIFICATION_SEVERITIES)}"
+                ),
+                field="NOTIFICATION_MIN_SEVERITY",
+            ))
+
+        if self.notification_daily_digest_enabled:
+            issues.append(ConfigIssue(
+                severity="warning",
+                message=(
+                    "NOTIFICATION_DAILY_DIGEST_ENABLED 当前为预留配置；"
+                    "P4 不会发送每日摘要或持久化摘要内容。"
+                ),
+                field="NOTIFICATION_DAILY_DIGEST_ENABLED",
             ))
 
         has_feishu_app_id = bool((self.feishu_app_id or "").strip())
